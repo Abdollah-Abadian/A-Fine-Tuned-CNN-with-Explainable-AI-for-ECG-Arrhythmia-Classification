@@ -1,1 +1,126 @@
-# A-Fine-Tuned-CNN-with-Explainable-AI-for-ECG-Arrhythmia-Classification
+# Dataset: MIT-BIH Arrhythmia Database
+
+## 1. Source
+
+- **Name:** MIT-BIH Arrhythmia Database
+- **Publisher:** PhysioNet (https://physionet.org/content/mitdb/1.0.0/)
+- **License:** Open Data Commons Attribution License v1.0 (ODC-By)
+- **Original references:** Moody & Mark (2001) [29]; Goldberger et al. (2000) [35]
+
+Download automatically with:
+
+```bash
+python src/download_mitbih.py --out data/raw
+```
+
+which wraps `wfdb.dl_database('mitdb', dl_dir='data/raw')`. This pulls all
+48 records (`.dat`, `.hea`, `.atr` triplets), totalling ~110 MB.
+
+## 2. Raw signal characteristics
+
+| Property | Value |
+|---|---|
+| Number of recordings | 48 half-hour, two-channel ambulatory ECGs |
+| Number of subjects | 47 (25 men aged 32–89, 22 women aged 23–89) |
+| Recording period | BIH Arrhythmia Laboratory, 1975–1979 |
+| Source population | ~4000 24-h ambulatory recordings, 60% inpatient / 40% outpatient, Beth Israel Hospital, Boston |
+| Sampling frequency | 360 Hz per channel |
+| Resolution | 11-bit over a 10 mV range |
+| Annotated heartbeats | ~110,000, each independently labeled by ≥2 cardiologists with consensus adjudication |
+| Record selection | 23 records selected at random from the source population; 25 records selected specifically to include clinically significant but statistically rare arrhythmias |
+
+## 3. AAMI EC57:1998 class mapping (Table 1 of the paper)
+
+The 15 original MIT-BIH beat annotation codes are consolidated into 5 AAMI
+superclasses. This mapping is implemented verbatim in `src/aami_mapping.py`:
+
+| MIT-BIH Code | Original Description | AAMI Class |
+|---|---|---|
+| 0 | Normal (NOR) | N |
+| 1 | Left Bundle Branch Block (LBBB) | N |
+| 2 | Right Bundle Branch Block (RBBB) | N |
+| 3 | Aberrated Atrial Premature Beat (APB) | S |
+| 4 | Premature Ventricular Contraction (PVC) | V |
+| 5 | Fusion of Ventricular and Normal Beat | F |
+| 6 | Nodal (Junctional) Premature Beat | S |
+| 7 | Atrial Premature Beat (APB) | S |
+| 8 | Premature or Ectopic Supraventricular Beat | S |
+| 9 | Ventricular Escape Beat | V |
+| 10 | Nodal (Junctional) Escape Beat | S |
+| 11 | Ventricular Flutter Wave | V |
+| 12 | Paced Beat | Q |
+| 13 | Fusion of Paced and Normal Beat | Q |
+| 14 | Unclassifiable Beat | Q |
+| 34 | Non-conducted P-wave (Blocked APB) | S |
+
+Pre-augmentation class totals used in the paper (after AAMI mapping, before
+patient-wise split): **N ≈ 90,600, S ≈ 7,600, V ≈ 6,960, F ≈ 1,430, Q ≈ 3,410**.
+
+## 4. Patient-wise inter-patient split (de Chazal et al. protocol)
+
+Enforced in `src/dataset.py::DE_CHAZAL_TRAIN_RECORDS` /
+`DE_CHAZAL_TEST_RECORDS` to guarantee no patient appears in both partitions:
+
+- **Training set (22 records):** 101, 106, 108, 109, 112, 114, 115, 116, 118,
+  119, 122, 124, 201, 203, 205, 207, 208, 209, 215, 220, 223, 230
+- **Test set (22 records):** 100, 103, 105, 111, 113, 117, 121, 123, 200, 202,
+  210, 212, 213, 214, 219, 221, 222, 228, 231, 232, 233, 234
+- 10% of the training-partition patients are further held out for validation.
+- An optional Leave-One-Patient-Out (LOOPO) cross-validation mode is provided
+  in `src/dataset.py::loopo_splits` for the subject-wise generalization study
+  (Table 6).
+
+## 5. Preprocessing pipeline (§3.1)
+
+1. Band-pass Butterworth filter, 0.5–45 Hz, to remove baseline wander and
+   high-frequency EMG/powerline noise.
+2. R-peak-centered segmentation using MIT-BIH reference annotations: **93
+   samples before + 94 samples after the R-peak = 187 time-steps** (519 ms
+   @ 360 Hz), long enough to contain the full P–QRS–T complex (see Table 2
+   in the paper for interval justification).
+3. Per-channel Z-score standardization.
+4. RR-interval dynamic features (previous-RR, post-RR, local-RR, ratio-RR),
+   Z-scored separately (Eq. 1–5), forming the temporal branch input.
+5. Stratified augmentation applied **only to the training partition**:
+   amplitude scaling ∈ U(0.9, 1.1), temporal warp α ∈ U(0.8, 1.2); samples
+   with resulting R-peak shift > ±5 samples or QRS amplitude change > ±20%
+   are rejected. This brings the training set to ~50,000 samples, roughly
+   balanced at ~10,000 per class.
+6. Final split ratio (post patient-wise partitioning): 80% train / 10% val /
+   10% test.
+
+## 6. `data/sample/sample_beats.csv`
+
+Because the full MIT-BIH database (110,000 beats, ~110 MB of binary
+waveform files under a PhysioNet redistribution license) is not bundled with
+this repository, `sample_beats.csv` ships a **200-beat illustrative sample**
+(40 beats per AAMI class) so the pipeline can be smoke-tested end-to-end
+without a network download. Each row contains:
+
+| Column | Description |
+|---|---|
+| `record_id` | synthetic record identifier, `SAMPLE_001`…`SAMPLE_200` |
+| `beat_index` | index of the beat within the (synthetic) record |
+| `aami_class` | one of `N`, `S`, `V`, `F`, `Q` |
+| `x_000` … `x_186` | 187 Z-score-normalized amplitude samples of the R-peak-centered window |
+| `rr_prev`, `rr_post`, `rr_local`, `rr_ratio` | Z-scored RR-interval dynamic features |
+
+This sample is generated by `src/preprocessing.py::synthesize_sample_csv`
+using parametric Gaussian P-QRS-T templates per class (not real patient data)
+purely so unit tests and the notebook walkthrough run without PhysioNet
+access. **All quantitative results reported in `results/` must be produced
+from the real, downloaded MIT-BIH database, not from this sample file.**
+
+## 7. Directory contents after running the pipeline
+
+```
+data/
+├── raw/                 # .dat/.hea/.atr from PhysioNet (48 records)
+├── processed/
+│   ├── train.npz         # X_morph (N,187,1), X_rr (N,4), y (N,), record_id (N,)
+│   ├── val.npz
+│   ├── test.npz
+│   └── split_manifest.json
+└── sample/
+    └── sample_beats.csv
+```
